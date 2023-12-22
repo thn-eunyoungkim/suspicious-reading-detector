@@ -2,85 +2,224 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/xml"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
-
-	"github.com/jedib0t/go-pretty/v6/table"
 )
 
-func main() {
-	// Get the current working directory
-	currentDir, err := os.Getwd()
-	if err != nil {
-		fmt.Println("Error getting current working directory:", err)
-		return
-	}
+type Reading struct {
+	CustomerId  string
+	YearMonth   string
+	Consumption int
+}
 
-	// Construct the full path to the CSV file in the "inputs" folder
-	filePath := filepath.Join(currentDir, "inputs", "2016-readings.csv")
+type ReadingCollection struct {
+	Readings []Reading
+}
 
-	// Open the CSV file
+type CustomerId string
+
+func GetReadingsByCustomerIdFromCsv(filePath string) (map[CustomerId]ReadingCollection, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("Error opening CSV file:", err)
-		return
+		return nil, fmt.Errorf("error opening CSV file: %w", err)
 	}
 	defer file.Close()
 
 	// Create a new CSV reader
 	reader := csv.NewReader(file)
+	rawData := make([][]string, 0)
 
-	// Read all records from the CSV file
-	records, err := reader.ReadAll()
+	// Read all CSV records
+	for {
+		records, err := reader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Fatal(err)
+		}
+		rawData = append(rawData, records)
+		// fmt.Println(records)
+	}
+
+	// Readings map initialization
+	byCustomerId := make(map[CustomerId]ReadingCollection)
+
+	// Process CSV records
+	for _, row := range rawData {
+		customerId := CustomerId(row[0])
+		yearMonth := row[1]
+		consumption, _ := strconv.Atoi(row[2])
+		reading := Reading{CustomerId: string(customerId), YearMonth: yearMonth, Consumption: consumption}
+
+		// Check if CustomerId exists in the map
+		if collection, ok := byCustomerId[customerId]; !ok {
+			byCustomerId[customerId] = ReadingCollection{Readings: []Reading{reading}}
+		} else {
+			collection.Readings = append(collection.Readings, reading)
+			byCustomerId[customerId] = collection
+		}
+	}
+	return byCustomerId, nil
+}
+
+func GetReadingsByCustonerIdFromXml(filePath string) (map[CustomerId]ReadingCollection, error) {
+	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("Error reading CSV records:", err)
-		return
+		return nil, fmt.Errorf("error opening XML file: %w", err)
 	}
+	defer file.Close()
 
-	// Create a new table
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
+	decoder := xml.NewDecoder(file)
 
-	// Convert the header (records[0]) to table.Row
-	headerRow := make(table.Row, len(records[0]))
-	for i, header := range records[0] {
-		headerRow[i] = header
-	}
+	// Readings map initialization
+	byCustomerId := make(map[CustomerId]ReadingCollection)
 
-	// Set column names based on the first row of the CSV file
-	t.AppendHeader(headerRow)
-
-	// Append data rows to the table
-	for _, record := range records[1:] {
-		// Convert each data row to table.Row
-		dataRow := make(table.Row, len(record))
-		for i, value := range record {
-			dataRow[i] = value
+	var currentReading Reading
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("error reading XML tokens: %w", err)
 		}
 
-		t.AppendRow(dataRow)
+		switch token := token.(type) {
+		case xml.StartElement:
+			switch token.Name.Local {
+			case "reading":
+				// Start of a new Reading element, reset currentReading
+				currentReading = Reading{}
+
+				// Extract attributes (clientID, period)
+				for _, attr := range token.Attr {
+					switch attr.Name.Local {
+					case "clientID":
+						currentReading.CustomerId = attr.Value
+					case "period":
+						currentReading.YearMonth = attr.Value
+					}
+				}
+
+				// Read the content of the reading element
+				if err := decoder.DecodeElement(&currentReading.Consumption, &token); err != nil {
+					return nil, fmt.Errorf("error decoding Consumption: %w", err)
+				}
+
+				// Add the currentReading to the map
+				customerID := CustomerId(currentReading.CustomerId)
+				if collection, ok := byCustomerId[customerID]; !ok {
+					byCustomerId[customerID] = ReadingCollection{Readings: []Reading{currentReading}}
+				} else {
+					collection.Readings = append(collection.Readings, currentReading)
+					byCustomerId[customerID] = collection
+				}
+			}
+		}
 	}
 
-	// Render the table
-	t.Render()
+	return byCustomerId, nil
+}
 
-	if len(records) > 6 {
-		reading5, _ := strconv.Atoi(records[5][2])
-		reading6, _ := strconv.Atoi(records[6][2])
-		average := (reading5 + reading6) / 2
+func (c ReadingCollection) Median() (int, bool) {
+	n := len(c.Readings)
+	if n < 6 {
+		return 0, false
+	}
 
-		headerRow := make(table.Row, len(records[0]))
-		for i, header := range records[0] {
-			headerRow[i] = header
-			fmt.Println(header)
+	// Sort the readings by consumption
+	sortedReadings := make([]int, n)
+	for i, reading := range c.Readings {
+		sortedReadings[i] = reading.Consumption
+	}
+	sort.Ints(sortedReadings)
+
+	// Calculate the median value as the average of the two middle values
+	medianIndex := (n - 1) / 2
+	median := sortedReadings[medianIndex]
+	return median, true
+}
+
+func obtainReadings(filePath string) (map[CustomerId]ReadingCollection, error) {
+	// cvs or xml
+	fileType := filepath.Ext(filePath)
+
+	switch fileType {
+	case ".csv":
+		readings, err := GetReadingsByCustomerIdFromCsv(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("error obtaining readings from CSV: %w", err)
 		}
-
-		// Render the table
-		t.Render()
-		fmt.Printf("Average of readings at indices 5 and 6: %d\n", average)
-	} else {
-		fmt.Println("Insufficient data for calculating the average at indices 5 and 6")
+		return readings, nil
+	case ".xml":
+		readings, err := GetReadingsByCustonerIdFromXml(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("error obtaining readings from XML: %w", err)
+		}
+		return readings, nil
+	default:
+		return nil, fmt.Errorf("unsupported file type: %s", fileType)
 	}
 }
+
+// TODO separate this logic
+// TODO we need an object inclues Median
+// TODO indtroduce a new object a list of suspicious readings
+// Reading, Median -> SuspiciousReading (Reading, Median)
+// function - readings - filter  return weird readings
+// create a function that creates a file with a suspicious readings
+func GetSuspiciousReadings(readings map[CustomerId]ReadingCollection) []Reading {
+	suspiciousReadings := make([]Reading, 0)
+
+	for _, collection := range readings {
+		median, ok := collection.Median()
+		if !ok {
+			continue
+		}
+		for _, reading := range collection.Readings {
+			// Check if the reading is either higher or lower than the annual median ± 50%
+			if float64(reading.Consumption) > 1.5*float64(median) || float64(reading.Consumption) < 0.5*float64(median) { // should not be inside
+
+				suspiciousReadings = append(suspiciousReadings, reading)
+			}
+		}
+	}
+
+	return suspiciousReadings
+}
+
+func printSuspiciousReadings(readings []Reading, median int) {
+
+	fmt.Printf("| %-15s | %-10s | %-10s | %-10s |\n", "Client", "Month", "Suspicious", "Median")
+	fmt.Println(" -------------------------------------------------------------------------------")
+
+	for _, reading := range readings {
+
+		// Check if the reading is either higher or lower than the annual median ± 50%
+		fmt.Printf("| %-15s | %-10s | %-10d | %-10.2f |\n", reading.CustomerId, reading.YearMonth, reading.Consumption, float64(median))
+
+	}
+}
+
+// filtering the readings - we need to have filtered readings
+
+func main() {
+	filePath := "inputs/2016-readings.xml"
+
+	readings, err := obtainReadings(filePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	//fmt.Println(readings)
+	filteredReadings := GetSuspiciousReadings(readings)
+	printSuspiciousReadings(filteredReadings, 0)
+}
+
+// creat
