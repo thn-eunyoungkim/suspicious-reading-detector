@@ -22,6 +22,11 @@ type ReadingCollection struct {
 	Readings []Reading
 }
 
+type SuspiciousReading struct {
+	Reading Reading
+	Median  int
+}
+
 type CustomerId string
 
 func GetReadingsByCustomerIdFromCsv(filePath string) (map[CustomerId]ReadingCollection, error) {
@@ -175,8 +180,8 @@ func obtainReadings(filePath string) (map[CustomerId]ReadingCollection, error) {
 // Reading, Median -> SuspiciousReading (Reading, Median)
 // function - readings - filter  return weird readings
 // create a function that creates a file with a suspicious readings
-func GetSuspiciousReadings(readings map[CustomerId]ReadingCollection) []Reading {
-	suspiciousReadings := make([]Reading, 0)
+func GetSuspiciousReadings(readings map[CustomerId]ReadingCollection) []SuspiciousReading {
+	suspiciousReadings := make([]SuspiciousReading, 0)
 
 	for _, collection := range readings {
 		median, ok := collection.Median()
@@ -184,15 +189,20 @@ func GetSuspiciousReadings(readings map[CustomerId]ReadingCollection) []Reading 
 			continue
 		}
 		for _, reading := range collection.Readings {
-			// Check if the reading is either higher or lower than the annual median ± 50%
-			if float64(reading.Consumption) > 1.5*float64(median) || float64(reading.Consumption) < 0.5*float64(median) { // should not be inside
-
-				suspiciousReadings = append(suspiciousReadings, reading)
+			if isSuspicious(reading.Consumption, median) {
+				suspiciousReadings = append(suspiciousReadings, SuspiciousReading{Reading: reading, Median: median})
 			}
 		}
 	}
 
 	return suspiciousReadings
+}
+
+func isSuspicious(consumption, median int) bool {
+	const lowerThreshold = 0.5
+	const upperThreshold = 1.5
+
+	return float64(consumption) > upperThreshold*float64(median) || float64(consumption) < lowerThreshold*float64(median)
 }
 
 func printSuspiciousReadings(readings []Reading, median int) {
@@ -208,6 +218,37 @@ func printSuspiciousReadings(readings []Reading, median int) {
 	}
 }
 
+func writeSuspiciousReadingsToFile(filename string, readings []SuspiciousReading) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("error creating file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	if err := writer.Write([]string{"Client", "Month", "Suspicious", "Median"}); err != nil {
+		return fmt.Errorf("error writing header: %w", err)
+	}
+
+	// Write data
+	for _, sr := range readings {
+		record := []string{
+			sr.Reading.CustomerId,
+			sr.Reading.YearMonth,
+			strconv.Itoa(sr.Reading.Consumption),
+			fmt.Sprintf("%.2f", float64(sr.Median)),
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("error writing record: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // filtering the readings - we need to have filtered readings
 
 func main() {
@@ -217,9 +258,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	//fmt.Println(readings)
+
 	filteredReadings := GetSuspiciousReadings(readings)
-	printSuspiciousReadings(filteredReadings, 0)
+
+	if err := writeSuspiciousReadingsToFile("suspicious_readings.csv", filteredReadings); err != nil {
+		log.Fatal(err)
+	}
 }
 
-// creat
+// OOP
+// refactoring
+// concepts : events & messages
+// event sourcing - state : whole story of what happened instead of keeping the last state
